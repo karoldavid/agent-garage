@@ -1,0 +1,457 @@
+{
+  "name": "4 Log Error Pattern Detector - Error Extraction",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger-1",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "/data/logs/test.log",
+        "options": {
+          "fileName": "test.log",
+          "dataPropertyName": "data"
+        }
+      },
+      "id": "read-log-file",
+      "name": "Read Log File",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        460,
+        300
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "options": {}
+      },
+      "id": "extract-from-file",
+      "name": "Extract from Log File",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "file-size",
+              "name": "fileSize",
+              "value": "={{ $json.data ? $json.data.length : 0 }}",
+              "type": "number"
+            },
+            {
+              "id": "file-content",
+              "name": "fileContent",
+              "value": "={{ $json.data }}",
+              "type": "string"
+            },
+            {
+              "id": "line-count",
+              "name": "lineCount",
+              "value": "={{ $json.data.split('\\n').length }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "extract-info",
+      "name": "Extract File Info",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract errors from log file\n// Simple hash function for deduplication\nfunction simpleHash(str) {\n  let hash = 0;\n  for (let i = 0; i < str.length; i++) {\n    const char = str.charCodeAt(i);\n    hash = ((hash << 5) - hash) + char;\n    hash = hash & hash; // Convert to 32-bit integer\n  }\n  return Math.abs(hash).toString(16).substring(0, 16);\n}\n\n// Get log content from previous node\nconst logContent = $input.first().json.fileContent || '';\n\n// Get input item to preserve item linking\nconst inputItem = $input.first();\n\nif (!logContent || logContent.trim() === '') {\n  return [{ \n    json: { errors: [], errorCount: 0 },\n    pairedItem: inputItem ? 0 : 0\n  }];\n}\n\n// Split log into lines\nconst lines = logContent.split('\\n').filter(line => line.trim() !== '');\n\n// Filter for ERROR, FATAL, WARN entries\nconst errorLevels = ['ERROR', 'FATAL', 'WARN'];\nconst errors = [];\n\nfor (const line of lines) {\n  // Check if line contains any error level\n  const hasError = errorLevels.some(level => line.includes(`[${level}]`));\n  \n  if (hasError) {\n    // Extract timestamp (ISO format at start of line)\n    const timestampMatch = line.match(/^(\\d{4}-\\d{2}-\\d{2}T[\\d:.]+Z)/);\n    const timestamp = timestampMatch ? timestampMatch[1] : null;\n    \n    // Extract error level\n    let level = null;\n    for (const errorLevel of errorLevels) {\n      if (line.includes(`[${errorLevel}]`)) {\n        level = errorLevel;\n        break;\n      }\n    }\n    \n    // Extract message (everything after the level)\n    const levelIndex = line.indexOf(`[${level}]`);\n    const message = levelIndex !== -1 \n      ? line.substring(levelIndex + level.length + 3).trim()\n      : line.trim();\n    \n    // Generate hash for deduplication (based on level + message)\n    const hashInput = `${level}:${message}`;\n    const errorHash = simpleHash(hashInput);\n    \n    errors.push({\n      timestamp: timestamp,\n      level: level,\n      message: message,\n      errorHash: errorHash,\n      rawLine: line.trim()\n    });\n  }\n}\n\nreturn [{\n  json: {\n    errors: errors,\n    errorCount: errors.length,\n    errorLevels: {\n      ERROR: errors.filter(e => e.level === 'ERROR').length,\n      FATAL: errors.filter(e => e.level === 'FATAL').length,\n      WARN: errors.filter(e => e.level === 'WARN').length\n    }\n  },\n  pairedItem: inputItem ? 0 : 0\n}];"
+      },
+      "id": "extract-errors",
+      "name": "Extract Errors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare a small batch (up to 5) of errors for LLM classification\nconst inputItem = $input.first();\nconst inputData = inputItem.json;\nconst allErrors = inputData.errors || [];\nconst errors = allErrors.slice(0, 5);\n// Store original errors for later merging\nreturn [{ \n  json: { errors, originalErrors: errors },\n  pairedItem: inputItem ? 0 : 0\n}];"
+      },
+      "id": "prepare-error-batch",
+      "name": "Prepare Error Batch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "preserve-errors",
+              "name": "originalErrors",
+              "value": "={{ $json.originalErrors }}",
+              "type": "array"
+            },
+            {
+              "id": "preserve-errors-array",
+              "name": "errors",
+              "value": "={{ $json.errors }}",
+              "type": "array"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "preserve-original-errors",
+      "name": "Preserve Original Errors",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": "llama3.2:latest",
+        "options": {}
+      },
+      "id": "ollama-model",
+      "name": "Ollama Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        1780,
+        120
+      ],
+      "credentials": {
+        "ollamaApi": {
+          "id": "xHuYe0MDGOs9IpBW",
+          "name": "Local Ollama service"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "You will receive a JSON array named errors. Each error has an errorHash field. For EACH AND EVERY error in the input array, you MUST produce a JSON array item with the EXACT errorHash, plus category and summary.\\n\\nCRITICAL REQUIREMENTS:\\n1. You MUST process ALL errors in the input array\\n2. You MUST use the EXACT errorHash value from each input error (do NOT generate new hashes)\\n3. The output array MUST have the same number of items as the input array\\n4. Each output item MUST include: errorHash (exact match), category, summary\\n\\nFormat: [{ errorHash: \"<exact value>\", category: \"<category>\", summary: \"<summary>\" }, ...]\\n\\nConstraints:\\n- errorHash: MUST match the errorHash from the input error exactly (case-sensitive)\\n- Category: one of [database, network, storage, auth, parsing, timeout, permission, application, configuration, other]\\n- Summary: one short sentence (max 20 words) describing the error\\n- Output JSON array only (no prose, no markdown, no explanations)\\n\\nInput errors: {{ JSON.stringify($json.errors) }}\\n\\nRemember: Output array length MUST equal input array length. Process every single error.",
+        "options": {
+          "responseFormat": "content",
+          "systemMessage": "You are a precise classifier. Output STRICT JSON only, no commentary.",
+          "temperature": 0.1
+        }
+      },
+      "id": "classify-errors-llm",
+      "name": "Classify Errors (LLM)",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.9,
+      "position": [
+        2020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge LLM results back to errors by errorHash\n// Get original errors - try multiple methods\nlet originalErrors = [];\n\n// Method 1: Try to get from Prepare Error Batch node\ntry {\n  const batchData = $items('Prepare Error Batch', 0, 0);\n  if (batchData && batchData.length > 0) {\n    const batch = batchData[0].json;\n    if (batch && batch.originalErrors && Array.isArray(batch.originalErrors)) {\n      originalErrors = batch.originalErrors;\n    } else if (batch && batch.errors && Array.isArray(batch.errors)) {\n      originalErrors = batch.errors;\n    }\n  }\n} catch (e1) {\n  // Method 2: Try to get from Preserve Original Errors\n  try {\n    const preservedData = $items('Preserve Original Errors', 0, 0);\n    if (preservedData && preservedData.length > 0) {\n      const preserved = preservedData[0].json;\n      if (preserved && preserved.originalErrors && Array.isArray(preserved.originalErrors)) {\n        originalErrors = preserved.originalErrors;\n      } else if (preserved && preserved.errors && Array.isArray(preserved.errors)) {\n        originalErrors = preserved.errors;\n      }\n    }\n  } catch (e2) {\n    // Method 3: Try to get from Extract Errors (take first 5)\n    try {\n      const extractData = $items('Extract Errors', 0, 0);\n      if (extractData && extractData.length > 0) {\n        const extract = extractData[0].json;\n        if (extract && extract.errors && Array.isArray(extract.errors)) {\n          originalErrors = extract.errors.slice(0, 5);\n        }\n      }\n    } catch (e3) {\n      // Method 4: Try using node IDs instead of names\n      try {\n        const extractData = $items('extract-errors', 0, 0);\n        if (extractData && extractData.length > 0) {\n          const extract = extractData[0].json;\n          if (extract && extract.errors && Array.isArray(extract.errors)) {\n            originalErrors = extract.errors.slice(0, 5);\n          }\n        }\n      } catch (e4) {\n        // Method 5: Try with prepare-error-batch ID\n        try {\n          const batchData = $items('prepare-error-batch', 0, 0);\n          if (batchData && batchData.length > 0) {\n            const batch = batchData[0].json;\n            if (batch && batch.originalErrors && Array.isArray(batch.originalErrors)) {\n              originalErrors = batch.originalErrors;\n            } else if (batch && batch.errors && Array.isArray(batch.errors)) {\n              originalErrors = batch.errors;\n            }\n          }\n        } catch (e5) {\n          originalErrors = [];\n        }\n      }\n    }\n  }\n}\n\n// If still empty, we'll match LLM results by index only (without original error metadata)\nif (originalErrors.length === 0) {\n  console.warn('Could not retrieve original errors - will create minimal error objects from LLM results');\n}\n\n// Get LLM output from current input (Agent node output)\nconst raw = $input.first().json;\nconst content = raw.content ?? raw.text ?? raw.output ?? raw;\nlet parsed = [];\n\ntry {\n  // Try to parse LLM response as JSON\n  if (typeof content === 'string') {\n    // Remove markdown code blocks if present\n    let cleaned = content.replace(/```json/g, '').replace(/```/g, '').trim();\n    // Find JSON array or object by finding brackets\n    const arrayStart = cleaned.indexOf('[');\n    const arrayEnd = cleaned.lastIndexOf(']');\n    const objStart = cleaned.indexOf('{');\n    const objEnd = cleaned.lastIndexOf('}');\n    \n    if (arrayStart !== -1 && arrayEnd !== -1 && arrayEnd > arrayStart) {\n      parsed = JSON.parse(cleaned.substring(arrayStart, arrayEnd + 1));\n    } else if (objStart !== -1 && objEnd !== -1 && objEnd > objStart) {\n      parsed = [JSON.parse(cleaned.substring(objStart, objEnd + 1))];\n    } else {\n      parsed = JSON.parse(cleaned);\n    }\n  } else if (Array.isArray(content)) {\n    parsed = content;\n  } else if (content && typeof content === 'object') {\n    parsed = [content];\n  }\n} catch (e) {\n  // If parsing fails, return empty array\n  parsed = [];\n}\n\n// Ensure parsed is an array\nif (!Array.isArray(parsed)) {\n  parsed = [];\n}\n\n// Create map of LLM results by errorHash\nconst llmByHash = new Map();\n// Also create a map by index in case errorHash doesn't match\nconst llmByIndex = new Map();\n\nparsed.forEach((item, index) => {\n  if (item && item.errorHash) {\n    llmByHash.set(item.errorHash, item);\n  }\n  // Store by index as fallback\n  llmByIndex.set(index, item);\n});\n\n// Merge LLM results with original errors\nlet merged = [];\n\nif (originalErrors.length > 0) {\n  // We have original errors - merge with LLM results\n  merged = originalErrors.map((e, index) => {\n    // Try to find LLM result by errorHash (exact match)\n    let llmResult = llmByHash.get(e.errorHash);\n    \n    // If not found by exact hash, try case-insensitive match\n    if (!llmResult && e.errorHash) {\n      for (const [hash, result] of llmByHash.entries()) {\n        if (hash && hash.toLowerCase() === e.errorHash.toLowerCase()) {\n          llmResult = result;\n          break;\n        }\n      }\n    }\n    \n    // If not found by hash, try by index (in case LLM didn't preserve hash)\n    if (!llmResult && llmByIndex.has(index)) {\n      llmResult = llmByIndex.get(index);\n    }\n    \n    // If still no match, check if LLM result has a different hash format\n    if (!llmResult && parsed.length > index) {\n      const potentialMatch = parsed[index];\n      if (potentialMatch && (potentialMatch.errorHash || potentialMatch.error_hash)) {\n        const llmHash = potentialMatch.errorHash || potentialMatch.error_hash;\n        if (llmHash && (llmHash === e.errorHash || llmHash.toLowerCase() === e.errorHash.toLowerCase())) {\n          llmResult = potentialMatch;\n        }\n      }\n    }\n    \n    return {\n      ...e,\n      category: llmResult?.category ?? null,\n      summary: llmResult?.summary ?? null\n    };\n  });\n  \n  // Log warning if LLM returned fewer results than expected\n  if (parsed.length < originalErrors.length) {\n    console.warn(`LLM returned ${parsed.length} results but expected ${originalErrors.length} errors. Some errors may have null category/summary.`);\n  }\n} else {\n  // No original errors retrieved - create minimal error objects from LLM results\n  // This is a fallback - we'll have category and summary but missing other fields\n  merged = parsed.map((llmResult, index) => {\n    return {\n      timestamp: null,\n      level: 'UNKNOWN',\n      message: llmResult.summary || 'Error classified by LLM',\n      errorHash: llmResult.errorHash || `llm-${index}`, \n      rawLine: null,\n      category: llmResult.category || null,\n      summary: llmResult.summary || null\n    };\n  });\n}\n\n// Return the merged errors, preserving input item structure\nconst inputItem = $input.first();\nreturn [{\n  json: {\n    ...inputItem.json,\n    errors: merged\n  },\n  pairedItem: inputItem ? 0 : 0\n}];"
+      },
+      "id": "merge-llm-results",
+      "name": "Merge LLM Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Expand errors array into individual items for database insertion\n// Get input data from Merge LLM Results node\nconst inputData = $input.first().json;\nlet errors = [];\n\n// The Merge LLM Results node outputs: { errors: [...] }\nif (inputData && inputData.errors && Array.isArray(inputData.errors)) {\n  errors = inputData.errors;\n} else {\n  // Fallback: check if input is directly an array\n  if (Array.isArray(inputData)) {\n    errors = inputData;\n  }\n  // Fallback: check all input items\n  else {\n    const allInputs = $input.all();\n    for (const item of allInputs) {\n      if (item.json && item.json.errors && Array.isArray(item.json.errors) && item.json.errors.length > 0) {\n        errors = item.json.errors;\n        break;\n      }\n    }\n  }\n}\n\n// If no errors found, return empty array (don't insert anything)\nif (errors.length === 0) {\n  return [];\n}\n\nconst sourceFile = 'test.log';\n\n// Return one item per error for database insertion\n// Each error should have: timestamp, level, message, errorHash, category, summary, rawLine\n// Get input item to preserve item linking\nconst inputItem = $input.first();\nconst inputIndex = 0; // Since we're using first(), index is 0\n\n// Create output items with proper item linking\nreturn errors.filter(error => error && (error.errorHash || error.message)).map((error, index) => ({\n  json: {\n    timestamp: error.timestamp ? new Date(error.timestamp).toISOString() : new Date().toISOString(),\n    source_file: sourceFile,\n    raw_error: error.rawLine || error.message || '',\n    error_hash: error.errorHash || '',\n    severity: error.level || 'UNKNOWN',\n    category: error.category || null,\n    summary: error.summary || null,\n    message: error.message || ''\n  },\n  // Link each output item back to the input item that produced it\n  pairedItem: inputIndex\n}));"
+      },
+      "id": "prepare-db-insert",
+      "name": "Prepare DB Insert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS error_logs (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  timestamp TIMESTAMP,\n  source_file TEXT,\n  raw_error TEXT,\n  error_hash TEXT,\n  severity TEXT,\n  category TEXT,\n  summary TEXT,\n  message TEXT,\n  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n);\n\nCREATE INDEX IF NOT EXISTS idx_error_hash ON error_logs(error_hash);\nCREATE INDEX IF NOT EXISTS idx_timestamp ON error_logs(timestamp);\nCREATE INDEX IF NOT EXISTS idx_severity ON error_logs(severity);",
+        "options": {}
+      },
+      "id": "create-table",
+      "name": "Create Table (if not exists)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT error_hash FROM error_logs WHERE error_hash IS NOT NULL AND error_hash != '';",
+        "options": {}
+      },
+      "id": "check-existing-errors",
+      "name": "Check Existing Errors",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter out errors that already exist in the database\n// Get existing error hashes from Check Existing Errors node (current input)\nconst existingHashesData = $input.all();\nconst existingHashes = new Set();\n\nif (existingHashesData && existingHashesData.length > 0) {\n  existingHashesData.forEach(item => {\n    if (item.json && item.json.error_hash) {\n      existingHashes.add(item.json.error_hash);\n    }\n  });\n}\n\n// Get errors to insert from Prepare DB Insert node\ntry {\n  const errorsToInsertData = $items('Prepare DB Insert', 0, 0);\n  \n  if (!errorsToInsertData || errorsToInsertData.length === 0) {\n    return [];\n  }\n  \n  // Filter out errors that already exist\n  const newErrors = errorsToInsertData.filter(item => {\n    const errorHash = item.json && item.json.error_hash;\n    return errorHash && errorHash !== '' && !existingHashes.has(errorHash);\n  });\n  \n  // Return only new errors (preserve pairedItem for item linking)\n  if (newErrors.length === 0) {\n    return [];\n  }\n  \n  return newErrors.map((item, index) => ({\n    json: item.json,\n    pairedItem: item.pairedItem !== undefined ? item.pairedItem : 0\n  }));\n} catch (e) {\n  // If we can't get errors to insert, return empty array\n  console.warn('Could not get errors to insert:', e.message);\n  return [];\n}"
+      },
+      "id": "filter-new-errors",
+      "name": "Filter New Errors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list",
+          "cachedResultName": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "error_logs",
+          "mode": "list",
+          "cachedResultName": "error_logs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $json.timestamp }}",
+            "source_file": "={{ $json.source_file }}",
+            "raw_error": "={{ $json.raw_error }}",
+            "error_hash": "={{ $json.error_hash }}",
+            "severity": "={{ $json.severity }}",
+            "category": "={{ $json.category }}",
+            "summary": "={{ $json.summary }}",
+            "message": "={{ $json.message }}"
+          }
+        },
+        "options": {
+          "skipOnConflict": true
+        }
+      },
+      "id": "insert-errors",
+      "name": "Insert Errors to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2900,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Log File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Log File": {
+      "main": [
+        [
+          {
+            "node": "Extract from Log File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from Log File": {
+      "main": [
+        [
+          {
+            "node": "Extract File Info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract File Info": {
+      "main": [
+        [
+          {
+            "node": "Extract Errors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Errors": {
+      "main": [
+        [
+          {
+            "node": "Prepare Error Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Error Batch": {
+      "main": [
+        [
+          {
+            "node": "Preserve Original Errors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preserve Original Errors": {
+      "main": [
+        [
+          {
+            "node": "Classify Errors (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Classify Errors (LLM)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Errors (LLM)": {
+      "main": [
+        [
+          {
+            "node": "Merge LLM Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge LLM Results": {
+      "main": [
+        [
+          {
+            "node": "Prepare DB Insert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare DB Insert": {
+      "main": [
+        [
+          {
+            "node": "Create Table (if not exists)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Existing Errors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Existing Errors": {
+      "main": [
+        [
+          {
+            "node": "Filter New Errors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter New Errors": {
+      "main": [
+        [
+          {
+            "node": "Insert Errors to DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Table (if not exists)": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": []
+}

@@ -4,6 +4,9 @@
 *~
 *.swp
 
+# Environment variables
+.env
+
 # Logs
 *.log
 

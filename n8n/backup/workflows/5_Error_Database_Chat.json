@@ -1,0 +1,279 @@
+{
+  "name": "5 Error Database Chat - OpenWebUI Integration",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "error-db-chat",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "error-db-chat"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract user query from webhook payload\nconst inputItem = $input.first();\nconst body = inputItem.json.body || inputItem.json;\n\n// Handle different payload formats (OpenWebUI, direct POST, etc.)\nlet userQuery = '';\n\nif (typeof body === 'string') {\n  userQuery = body;\n} else if (body.query) {\n  userQuery = body.query;\n} else if (body.message) {\n  userQuery = body.message;\n} else if (body.text) {\n  userQuery = body.text;\n} else if (body.input) {\n  userQuery = body.input;\n}\n\n// If still empty, try to get from raw body\nif (!userQuery && inputItem.binary && inputItem.binary.data) {\n  try {\n    const rawBody = Buffer.from(inputItem.binary.data.data, 'base64').toString('utf-8');\n    const parsed = JSON.parse(rawBody);\n    userQuery = parsed.query || parsed.message || parsed.text || parsed.input || rawBody;\n  } catch (e) {\n    userQuery = 'Show me recent errors';\n  }\n}\n\n// Default query if still empty\nif (!userQuery || userQuery.trim() === '') {\n  userQuery = 'Show me recent errors';\n}\n\nreturn [{\n  json: {\n    query: userQuery.trim(),\n    timestamp: new Date().toISOString()\n  },\n  pairedItem: inputItem ? 0 : 0\n}];"
+      },
+      "id": "parse-query",
+      "name": "Parse User Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": "llama3.2:latest",
+        "options": {}
+      },
+      "id": "ollama-model",
+      "name": "Ollama Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        680,
+        120
+      ],
+      "credentials": {
+        "ollamaApi": {
+          "id": "xHuYe0MDGOs9IpBW",
+          "name": "Local Ollama service"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a SQL query generator for an error log database. Based on the user's natural language query, generate a PostgreSQL query to retrieve relevant error information.\\n\\nDatabase schema:\\n- Table: error_logs\\n- Columns: id, timestamp, source_file, raw_error, error_hash, severity (ERROR/FATAL/WARN), category, summary, message, created_at\\n\\nUser query: {{ $json.query }}\\n\\nGenerate ONLY a valid PostgreSQL SELECT query. Do not include explanations, markdown, or any other text. Just the SQL query.\\n\\nExamples:\\n- \"Show me recent errors\" → SELECT * FROM error_logs ORDER BY created_at DESC LIMIT 10;\\n- \"How many database errors?\" → SELECT COUNT(*) FROM error_logs WHERE category = 'database';\\n- \"What are the most common error categories?\" → SELECT category, COUNT(*) as count FROM error_logs WHERE category IS NOT NULL GROUP BY category ORDER BY count DESC;\\n- \"Show errors from the last 24 hours\" → SELECT * FROM error_logs WHERE timestamp >= NOW() - INTERVAL '24 hours' ORDER BY timestamp DESC;",
+        "options": {
+          "responseFormat": "content",
+          "systemMessage": "You are a precise SQL query generator. Output ONLY valid PostgreSQL SQL, no explanations.",
+          "temperature": 0.1
+        }
+      },
+      "id": "generate-sql",
+      "name": "Generate SQL Query",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.9,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract SQL query from LLM response\nconst inputItem = $input.first();\nconst raw = inputItem.json;\nconst content = raw.content ?? raw.text ?? raw.output ?? raw;\n\nlet sqlQuery = '';\n\ntry {\n  if (typeof content === 'string') {\n    // Remove markdown code blocks if present\n    let cleaned = content.replace(/```sql/gi, '').replace(/```/g, '').trim();\n    \n    // Try to parse as JSON first (in case LLM returns JSON format)\n    try {\n      const jsonParsed = JSON.parse(cleaned);\n      if (typeof jsonParsed === 'string') {\n        cleaned = jsonParsed;\n      } else if (jsonParsed.query) {\n        cleaned = jsonParsed.query;\n      } else if (Array.isArray(jsonParsed)) {\n        // Handle case where SQL is returned as array of strings with quotes\n        // e.g., [\"SELECT\", \"*\", \"FROM\", ...]\n        cleaned = jsonParsed.join(' ').replace(/\"/g, '');\n      }\n    } catch (e) {\n      // Not JSON, continue with string processing\n    }\n    \n    // Remove quotes around SQL keywords (fix for LLM output like: SELECT\", \"*\", \"FROM)\n    cleaned = cleaned.replace(/\"([A-Z]+)\"/g, '$1'); // Remove quotes around keywords\n    cleaned = cleaned.replace(/,\\s*\"/g, ' '); // Replace comma-quote with space\n    cleaned = cleaned.replace(/\"\\s*,/g, ' '); // Replace quote-comma with space\n    cleaned = cleaned.replace(/\"\\s*\"/g, ' '); // Replace quote-quote with space\n    cleaned = cleaned.replace(/\"/g, ''); // Remove all remaining quotes\n    cleaned = cleaned.replace(/\\s+/g, ' '); // Normalize whitespace\n    \n    // Find SQL by looking for SELECT\n    const selectIndex = cleaned.toUpperCase().indexOf('SELECT');\n    if (selectIndex !== -1) {\n      // Find the end - look for semicolon or end of string\n      const semicolonIndex = cleaned.indexOf(';', selectIndex);\n      if (semicolonIndex !== -1) {\n        sqlQuery = cleaned.substring(selectIndex, semicolonIndex + 1);\n      } else {\n        sqlQuery = cleaned.substring(selectIndex);\n        // Add semicolon if missing\n        if (!sqlQuery.trim().endsWith(';')) {\n          sqlQuery += ';';\n        }\n      }\n    } else {\n      sqlQuery = cleaned;\n    }\n  } else {\n    sqlQuery = String(content);\n  }\n  \n  // Clean up the query - final pass\n  sqlQuery = sqlQuery.trim();\n  sqlQuery = sqlQuery.replace(/\\s+/g, ' '); // Normalize whitespace\n  \n  // Safety check: ensure it's a SELECT query only\n  if (!sqlQuery.toUpperCase().startsWith('SELECT')) {\n    throw new Error('Only SELECT queries are allowed');\n  }\n  \n  // Remove any dangerous keywords\n  const dangerousKeywords = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'ALTER', 'CREATE', 'TRUNCATE'];\n  const upperQuery = sqlQuery.toUpperCase();\n  for (const keyword of dangerousKeywords) {\n    if (upperQuery.includes(keyword)) {\n      throw new Error(`Dangerous keyword detected: ${keyword}`);\n    }\n  }\n  \n} catch (e) {\n  // Fallback to a safe default query\n  console.warn('Error parsing SQL, using default:', e.message);\n  sqlQuery = \"SELECT timestamp, severity, category, summary, message FROM error_logs ORDER BY created_at DESC LIMIT 10;\";\n}\n\nreturn [{\n  json: {\n    sqlQuery: sqlQuery,\n    originalQuery: inputItem.json.query\n  },\n  pairedItem: inputItem ? 0 : 0\n}];"
+      },
+      "id": "extract-sql",
+      "name": "Extract SQL Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sqlQuery }}",
+        "options": {}
+      },
+      "id": "execute-query",
+      "name": "Execute SQL Query",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format query results for LLM response\nconst inputItem = $input.first();\nconst queryResults = $input.all();\nconst originalQuery = inputItem.json.originalQuery || 'query';\n\n// Convert results to array of objects\nconst results = queryResults.map(item => item.json);\n\n// Count results\nconst resultCount = results.length;\n\n// Format results as JSON string for LLM\nconst resultsJson = JSON.stringify(results, null, 2);\n\nreturn [{\n  json: {\n    originalQuery: originalQuery,\n    results: results,\n    resultCount: resultCount,\n    resultsJson: resultsJson\n  },\n  pairedItem: inputItem ? 0 : 0\n}];"
+      },
+      "id": "format-results",
+      "name": "Format Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=The user asked: \"{{ $json.originalQuery }}\"\\n\\nYou queried the error log database and got {{ $json.resultCount }} result row(s).\\n\\nQuery results:\\n{{ $json.resultsJson }}\\n\\nIMPORTANT: If the query was a COUNT query (e.g., \"How many errors?\"), the result will be a single row with a count value. In this case, say \"There are X errors\" where X is the count value, NOT \"We found 1 result\".\\n\\nFor other queries, provide a natural, conversational response based on the results. Format the response in a clear, readable way. If there are many results, summarize the key findings. If there are no results, explain that no matching errors were found.\\n\\nResponse:",
+        "options": {
+          "responseFormat": "content",
+          "systemMessage": "You are a helpful assistant that explains database query results in natural language. Be concise and clear.",
+          "temperature": 0.3
+        }
+      },
+      "id": "format-response",
+      "name": "Format Natural Response",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.9,
+      "position": [
+        1780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract the natural language response\nconst inputItem = $input.first();\nconst raw = inputItem.json;\nconst content = raw.content ?? raw.text ?? raw.output ?? raw;\n\nlet response = '';\n\ntry {\n  if (typeof content === 'string') {\n    response = content.trim();\n  } else {\n    response = String(content);\n  }\n} catch (e) {\n  response = 'I encountered an error processing your query. Please try again.';\n}\n\nreturn [{\n  json: {\n    response: response,\n    timestamp: new Date().toISOString()\n  },\n  pairedItem: inputItem ? 0 : 0\n}];"
+      },
+      "id": "extract-response",
+      "name": "Extract Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"response\": $json.response, \"timestamp\": $json.timestamp } }}",
+        "options": {}
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2220,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse User Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse User Query": {
+      "main": [
+        [
+          {
+            "node": "Generate SQL Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Generate SQL Query",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Format Natural Response",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate SQL Query": {
+      "main": [
+        [
+          {
+            "node": "Extract SQL Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract SQL Query": {
+      "main": [
+        [
+          {
+            "node": "Execute SQL Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute SQL Query": {
+      "main": [
+        [
+          {
+            "node": "Format Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Results": {
+      "main": [
+        [
+          {
+            "node": "Format Natural Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Natural Response": {
+      "main": [
+        [
+          {
+            "node": "Extract Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Response": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "updatedAt": "2025-01-07T12:00:00.000Z",
+  "versionId": "1"
+}
+
